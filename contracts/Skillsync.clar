@@ -10,11 +10,19 @@
 (define-constant err-insufficient-balance (err u105))
 (define-constant err-lesson-not-pending (err u106))
 (define-constant err-already-validated (err u107))
+(define-constant err-not-authority (err u108))
+(define-constant err-already-certified (err u109))
+(define-constant err-certificate-not-found (err u110))
+(define-constant err-authority-exists (err u111))
+(define-constant err-invalid-price (err u112))
+(define-constant err-certificate-expired (err u113))
 
 (define-data-var next-skill-id uint u1)
 (define-data-var next-lesson-id uint u1)
+(define-data-var next-certificate-id uint u1)
 (define-data-var platform-fee uint u5)
 (define-data-var min-validation-stake uint u1000000)
+(define-data-var certificate-fee uint u500000)
 
 (define-map teachers principal {
   name: (string-ascii 100),
@@ -60,6 +68,41 @@
 (define-map user-balances principal uint)
 
 (define-map teacher-skills principal (list 100 uint))
+
+(define-map certification-authorities principal {
+  name: (string-ascii 100),
+  description: (string-ascii 500),
+  website: (string-ascii 200),
+  active: bool,
+  total-certificates: uint,
+  created-at: uint,
+  verification-fee: uint
+})
+
+(define-map skill-certificates uint {
+  skill-id: uint,
+  teacher: principal,
+  authority: principal,
+  certificate-name: (string-ascii 200),
+  certificate-description: (string-ascii 500),
+  issue-date: uint,
+  expiry-date: uint,
+  certificate-level: (string-ascii 50),
+  verification-code: (string-ascii 100),
+  active: bool
+})
+
+(define-map authority-certificates principal (list 200 uint))
+
+(define-map teacher-certificates principal (list 50 uint))
+
+(define-map certificate-marketplace uint {
+  certificate-id: uint,
+  seller: principal,
+  price: uint,
+  for-sale: bool,
+  created-at: uint
+})
 
 (define-public (register-teacher (name (string-ascii 100)) (bio (string-ascii 500)))
   (let ((current-block stacks-block-height))
@@ -242,6 +285,151 @@
   )
 )
 
+(define-public (register-certification-authority 
+  (name (string-ascii 100))
+  (description (string-ascii 500))
+  (website (string-ascii 200))
+  (verification-fee uint))
+  (let ((current-block stacks-block-height))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-none (map-get? certification-authorities tx-sender)) err-authority-exists)
+    (asserts! (> verification-fee u0) err-invalid-price)
+    (map-set certification-authorities tx-sender {
+      name: name,
+      description: description,
+      website: website,
+      active: true,
+      total-certificates: u0,
+      created-at: current-block,
+      verification-fee: verification-fee
+    })
+    (ok true)
+  )
+)
+
+(define-public (update-authority-status (authority principal) (active bool))
+  (let ((authority-data (unwrap! (map-get? certification-authorities authority) err-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set certification-authorities authority (merge authority-data {active: active}))
+    (ok true)
+  )
+)
+
+(define-public (issue-skill-certificate
+  (skill-id uint)
+  (teacher principal)
+  (certificate-name (string-ascii 200))
+  (certificate-description (string-ascii 500))
+  (certificate-level (string-ascii 50))
+  (verification-code (string-ascii 100))
+  (validity-days uint))
+  (let (
+    (certificate-id (var-get next-certificate-id))
+    (current-block stacks-block-height)
+    (expiry-date (+ current-block validity-days))
+    (skill-data (unwrap! (map-get? skills skill-id) err-not-found))
+    (authority-data (unwrap! (map-get? certification-authorities tx-sender) err-not-authority))
+    (teacher-certs (default-to (list) (map-get? teacher-certificates teacher)))
+    (authority-certs (default-to (list) (map-get? authority-certificates tx-sender)))
+    (verification-fee (get verification-fee authority-data))
+    (teacher-balance (default-to u0 (map-get? user-balances teacher)))
+  )
+    (asserts! (get active authority-data) err-unauthorized)
+    (asserts! (is-eq teacher (get teacher skill-data)) err-unauthorized)
+    (asserts! (>= teacher-balance verification-fee) err-insufficient-balance)
+    (asserts! (> validity-days u0) err-invalid-amount)
+    (map-set user-balances teacher (- teacher-balance verification-fee))
+    (map-set user-balances tx-sender (+ (default-to u0 (map-get? user-balances tx-sender)) verification-fee))
+    (map-set skill-certificates certificate-id {
+      skill-id: skill-id,
+      teacher: teacher,
+      authority: tx-sender,
+      certificate-name: certificate-name,
+      certificate-description: certificate-description,
+      issue-date: current-block,
+      expiry-date: expiry-date,
+      certificate-level: certificate-level,
+      verification-code: verification-code,
+      active: true
+    })
+    (map-set teacher-certificates teacher (unwrap! (as-max-len? (append teacher-certs certificate-id) u50) err-invalid-amount))
+    (map-set authority-certificates tx-sender (unwrap! (as-max-len? (append authority-certs certificate-id) u200) err-invalid-amount))
+    (map-set certification-authorities tx-sender (merge authority-data {
+      total-certificates: (+ (get total-certificates authority-data) u1)
+    }))
+    (var-set next-certificate-id (+ certificate-id u1))
+    (ok certificate-id)
+  )
+)
+
+(define-public (revoke-certificate (certificate-id uint))
+  (let ((certificate-data (unwrap! (map-get? skill-certificates certificate-id) err-certificate-not-found)))
+    (asserts! (is-eq tx-sender (get authority certificate-data)) err-unauthorized)
+    (map-set skill-certificates certificate-id (merge certificate-data {active: false}))
+    (ok true)
+  )
+)
+
+(define-public (verify-certificate (certificate-id uint) (verification-code (string-ascii 100)))
+  (let ((certificate-data (unwrap! (map-get? skill-certificates certificate-id) err-certificate-not-found)))
+    (asserts! (is-eq verification-code (get verification-code certificate-data)) err-unauthorized)
+    (asserts! (get active certificate-data) err-certificate-expired)
+    (asserts! (> (get expiry-date certificate-data) stacks-block-height) err-certificate-expired)
+    (ok certificate-data)
+  )
+)
+
+(define-public (list-certificate-for-sale (certificate-id uint) (price uint))
+  (let (
+    (certificate-data (unwrap! (map-get? skill-certificates certificate-id) err-certificate-not-found))
+    (current-block stacks-block-height)
+  )
+    (asserts! (is-eq tx-sender (get teacher certificate-data)) err-unauthorized)
+    (asserts! (get active certificate-data) err-certificate-expired)
+    (asserts! (> price u0) err-invalid-price)
+    (map-set certificate-marketplace certificate-id {
+      certificate-id: certificate-id,
+      seller: tx-sender,
+      price: price,
+      for-sale: true,
+      created-at: current-block
+    })
+    (ok true)
+  )
+)
+
+(define-public (buy-certificate (certificate-id uint))
+  (let (
+    (marketplace-data (unwrap! (map-get? certificate-marketplace certificate-id) err-not-found))
+    (certificate-data (unwrap! (map-get? skill-certificates certificate-id) err-certificate-not-found))
+    (buyer-balance (default-to u0 (map-get? user-balances tx-sender)))
+    (seller-balance (default-to u0 (map-get? user-balances (get seller marketplace-data))))
+    (price (get price marketplace-data))
+    (platform-cost (/ (* price (var-get platform-fee)) u100))
+    (seller-earnings (- price platform-cost))
+    (buyer-certs (default-to (list) (map-get? teacher-certificates tx-sender)))
+  )
+    (asserts! (get for-sale marketplace-data) err-unauthorized)
+    (asserts! (get active certificate-data) err-certificate-expired)
+    (asserts! (>= buyer-balance price) err-insufficient-balance)
+    (asserts! (not (is-eq tx-sender (get seller marketplace-data))) err-unauthorized)
+    (map-set user-balances tx-sender (- buyer-balance price))
+    (map-set user-balances (get seller marketplace-data) (+ seller-balance seller-earnings))
+    (map-set skill-certificates certificate-id (merge certificate-data {teacher: tx-sender}))
+    (map-set teacher-certificates tx-sender (unwrap! (as-max-len? (append buyer-certs certificate-id) u50) err-invalid-amount))
+    (map-set certificate-marketplace certificate-id (merge marketplace-data {for-sale: false}))
+    (ok true)
+  )
+)
+
+(define-public (remove-certificate-from-sale (certificate-id uint))
+  (let ((marketplace-data (unwrap! (map-get? certificate-marketplace certificate-id) err-not-found)))
+    (asserts! (is-eq tx-sender (get seller marketplace-data)) err-unauthorized)
+    (map-set certificate-marketplace certificate-id (merge marketplace-data {for-sale: false}))
+    (ok true)
+  )
+)
+
 (define-read-only (get-teacher (teacher principal))
   (map-get? teachers teacher)
 )
@@ -276,4 +464,40 @@
 
 (define-read-only (get-next-lesson-id)
   (var-get next-lesson-id)
+)
+
+(define-read-only (get-certification-authority (authority principal))
+  (map-get? certification-authorities authority)
+)
+
+(define-read-only (get-skill-certificate (certificate-id uint))
+  (map-get? skill-certificates certificate-id)
+)
+
+(define-read-only (get-teacher-certificates (teacher principal))
+  (default-to (list) (map-get? teacher-certificates teacher))
+)
+
+(define-read-only (get-authority-certificates (authority principal))
+  (default-to (list) (map-get? authority-certificates authority))
+)
+
+(define-read-only (get-certificate-marketplace-info (certificate-id uint))
+  (map-get? certificate-marketplace certificate-id)
+)
+
+(define-read-only (get-next-certificate-id)
+  (var-get next-certificate-id)
+)
+
+(define-read-only (get-certificate-fee)
+  (var-get certificate-fee)
+)
+
+(define-read-only (is-certificate-valid (certificate-id uint))
+  (match (map-get? skill-certificates certificate-id)
+    certificate-data (and 
+      (get active certificate-data) 
+      (> (get expiry-date certificate-data) stacks-block-height))
+    false)
 )
