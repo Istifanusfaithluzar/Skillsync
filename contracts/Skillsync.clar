@@ -16,13 +16,28 @@
 (define-constant err-authority-exists (err u111))
 (define-constant err-invalid-price (err u112))
 (define-constant err-certificate-expired (err u113))
+(define-constant err-mentorship-exists (err u114))
+(define-constant err-mentorship-not-found (err u115))
+(define-constant err-not-mentor (err u116))
+(define-constant err-not-mentee (err u117))
+(define-constant err-application-not-found (err u118))
+(define-constant err-application-exists (err u119))
+(define-constant err-phase-not-found (err u120))
+(define-constant err-phase-already-completed (err u121))
+(define-constant err-mentorship-full (err u122))
+(define-constant err-mentorship-not-active (err u123))
+(define-constant err-invalid-phase (err u124))
+(define-constant err-application-not-approved (err u125))
 
 (define-data-var next-skill-id uint u1)
 (define-data-var next-lesson-id uint u1)
 (define-data-var next-certificate-id uint u1)
+(define-data-var next-mentorship-id uint u1)
+(define-data-var next-application-id uint u1)
 (define-data-var platform-fee uint u5)
 (define-data-var min-validation-stake uint u1000000)
 (define-data-var certificate-fee uint u500000)
+(define-data-var mentorship-platform-fee uint u10)
 
 (define-map teachers principal {
   name: (string-ascii 100),
@@ -103,6 +118,72 @@
   for-sale: bool,
   created-at: uint
 })
+
+(define-map mentorship-programs uint {
+  mentor: principal,
+  skill-id: uint,
+  title: (string-ascii 200),
+  description: (string-ascii 1000),
+  duration-weeks: uint,
+  max-mentees: uint,
+  current-mentees: uint,
+  total-cost: uint,
+  application-fee: uint,
+  phases-count: uint,
+  active: bool,
+  created-at: uint,
+  completion-rate: uint,
+  mentor-rating: uint,
+  total-graduates: uint
+})
+
+(define-map mentorship-phases {program-id: uint, phase-number: uint} {
+  title: (string-ascii 100),
+  description: (string-ascii 500),
+  duration-weeks: uint,
+  required-hours: uint,
+  completion-criteria: (string-ascii 300),
+  reward-amount: uint
+})
+
+(define-map mentorship-applications uint {
+  program-id: uint,
+  applicant: principal,
+  mentor: principal,
+  motivation: (string-ascii 500),
+  experience-level: (string-ascii 50),
+  goals: (string-ascii 500),
+  status: (string-ascii 20),
+  applied-at: uint,
+  reviewed-at: (optional uint),
+  feedback: (optional (string-ascii 300))
+})
+
+(define-map mentorship-enrollments {program-id: uint, mentee: principal} {
+  enrolled-at: uint,
+  current-phase: uint,
+  phases-completed: uint,
+  total-hours-logged: uint,
+  performance-score: uint,
+  mentor-feedback: (optional (string-ascii 500)),
+  completion-status: (string-ascii 20),
+  graduation-date: (optional uint)
+})
+
+(define-map phase-completions {program-id: uint, mentee: principal, phase-number: uint} {
+  completed-at: uint,
+  hours-spent: uint,
+  mentor-assessment: uint,
+  mentee-reflection: (string-ascii 300),
+  evidence-provided: (string-ascii 200),
+  approved: bool
+})
+
+(define-map mentor-mentees principal (list 50 principal))
+
+(define-map mentee-programs principal (list 10 uint))
+
+(define-map program-applications uint (list 100 uint))
 
 (define-public (register-teacher (name (string-ascii 100)) (bio (string-ascii 500)))
   (let ((current-block stacks-block-height))
@@ -501,3 +582,338 @@
       (> (get expiry-date certificate-data) stacks-block-height))
     false)
 )
+
+(define-public (create-mentorship-program
+  (skill-id uint)
+  (title (string-ascii 200))
+  (description (string-ascii 1000))
+  (duration-weeks uint)
+  (max-mentees uint)
+  (total-cost uint)
+  (application-fee uint)
+  (phases-count uint))
+  (let (
+    (program-id (var-get next-mentorship-id))
+    (current-block stacks-block-height)
+    (skill-data (unwrap! (map-get? skills skill-id) err-not-found))
+    (teacher-data (unwrap! (map-get? teachers tx-sender) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get teacher skill-data)) err-unauthorized)
+    (asserts! (> duration-weeks u0) err-invalid-amount)
+    (asserts! (> max-mentees u0) err-invalid-amount)
+    (asserts! (> total-cost u0) err-invalid-amount)
+    (asserts! (> phases-count u0) err-invalid-amount)
+    (asserts! (<= phases-count u10) err-invalid-amount)
+    (map-set mentorship-programs program-id {
+      mentor: tx-sender,
+      skill-id: skill-id,
+      title: title,
+      description: description,
+      duration-weeks: duration-weeks,
+      max-mentees: max-mentees,
+      current-mentees: u0,
+      total-cost: total-cost,
+      application-fee: application-fee,
+      phases-count: phases-count,
+      active: true,
+      created-at: current-block,
+      completion-rate: u0,
+      mentor-rating: u0,
+      total-graduates: u0
+    })
+    (var-set next-mentorship-id (+ program-id u1))
+    (ok program-id)
+  )
+)
+
+(define-public (add-mentorship-phase
+  (program-id uint)
+  (phase-number uint)
+  (title (string-ascii 100))
+  (description (string-ascii 500))
+  (duration-weeks uint)
+  (required-hours uint)
+  (completion-criteria (string-ascii 300))
+  (reward-amount uint))
+  (let (
+    (program-data (unwrap! (map-get? mentorship-programs program-id) err-mentorship-not-found))
+    (phase-key {program-id: program-id, phase-number: phase-number})
+  )
+    (asserts! (is-eq tx-sender (get mentor program-data)) err-not-mentor)
+    (asserts! (> phase-number u0) err-invalid-phase)
+    (asserts! (<= phase-number (get phases-count program-data)) err-invalid-phase)
+    (asserts! (is-none (map-get? mentorship-phases phase-key)) err-phase-already-completed)
+    (asserts! (> duration-weeks u0) err-invalid-amount)
+    (asserts! (> required-hours u0) err-invalid-amount)
+    (map-set mentorship-phases phase-key {
+      title: title,
+      description: description,
+      duration-weeks: duration-weeks,
+      required-hours: required-hours,
+      completion-criteria: completion-criteria,
+      reward-amount: reward-amount
+    })
+    (ok true)
+  )
+)
+
+(define-public (apply-for-mentorship
+  (program-id uint)
+  (motivation (string-ascii 500))
+  (experience-level (string-ascii 50))
+  (goals (string-ascii 500)))
+  (let (
+    (application-id (var-get next-application-id))
+    (program-data (unwrap! (map-get? mentorship-programs program-id) err-mentorship-not-found))
+    (current-block stacks-block-height)
+    (user-balance (default-to u0 (map-get? user-balances tx-sender)))
+    (application-fee (get application-fee program-data))
+    (current-applications (default-to (list) (map-get? program-applications program-id)))
+  )
+    (asserts! (get active program-data) err-mentorship-not-active)
+    (asserts! (not (is-eq tx-sender (get mentor program-data))) err-unauthorized)
+    (asserts! (>= user-balance application-fee) err-insufficient-balance)
+    (map-set user-balances tx-sender (- user-balance application-fee))
+    (map-set user-balances (get mentor program-data) (+ (default-to u0 (map-get? user-balances (get mentor program-data))) application-fee))
+    (map-set mentorship-applications application-id {
+      program-id: program-id,
+      applicant: tx-sender,
+      mentor: (get mentor program-data),
+      motivation: motivation,
+      experience-level: experience-level,
+      goals: goals,
+      status: "pending",
+      applied-at: current-block,
+      reviewed-at: none,
+      feedback: none
+    })
+    (map-set program-applications program-id (unwrap! (as-max-len? (append current-applications application-id) u100) err-invalid-amount))
+    (var-set next-application-id (+ application-id u1))
+    (ok application-id)
+  )
+)
+
+(define-public (review-application
+  (application-id uint)
+  (approved bool)
+  (feedback (string-ascii 300)))
+  (let (
+    (application-data (unwrap! (map-get? mentorship-applications application-id) err-application-not-found))
+    (program-data (unwrap! (map-get? mentorship-programs (get program-id application-data)) err-mentorship-not-found))
+    (current-block stacks-block-height)
+    (applicant (get applicant application-data))
+    (program-id (get program-id application-data))
+    (mentor-mentees-list (default-to (list) (map-get? mentor-mentees tx-sender)))
+    (mentee-programs-list (default-to (list) (map-get? mentee-programs applicant)))
+  )
+    (asserts! (is-eq tx-sender (get mentor application-data)) err-not-mentor)
+    (asserts! (is-eq (get status application-data) "pending") err-application-not-found)
+    (asserts! (get active program-data) err-mentorship-not-active)
+    (if approved
+      (begin
+        (asserts! (< (get current-mentees program-data) (get max-mentees program-data)) err-mentorship-full)
+        (map-set mentorship-enrollments {program-id: program-id, mentee: applicant} {
+          enrolled-at: current-block,
+          current-phase: u1,
+          phases-completed: u0,
+          total-hours-logged: u0,
+          performance-score: u0,
+          mentor-feedback: none,
+          completion-status: "active",
+          graduation-date: none
+        })
+        (map-set mentorship-programs program-id (merge program-data {
+          current-mentees: (+ (get current-mentees program-data) u1)
+        }))
+        (map-set mentor-mentees tx-sender (unwrap! (as-max-len? (append mentor-mentees-list applicant) u50) err-invalid-amount))
+        (map-set mentee-programs applicant (unwrap! (as-max-len? (append mentee-programs-list program-id) u10) err-invalid-amount))
+        (map-set mentorship-applications application-id (merge application-data {
+          status: "approved",
+          reviewed-at: (some current-block),
+          feedback: (some feedback)
+        }))
+      )
+      (map-set mentorship-applications application-id (merge application-data {
+        status: "rejected",
+        reviewed-at: (some current-block),
+        feedback: (some feedback)
+      }))
+    )
+    (ok true)
+  )
+)
+
+(define-public (complete-phase
+  (program-id uint)
+  (phase-number uint)
+  (hours-spent uint)
+  (mentee-reflection (string-ascii 300))
+  (evidence-provided (string-ascii 200)))
+  (let (
+    (enrollment-key {program-id: program-id, mentee: tx-sender})
+    (phase-key {program-id: program-id, phase-number: phase-number})
+    (completion-key {program-id: program-id, mentee: tx-sender, phase-number: phase-number})
+    (enrollment-data (unwrap! (map-get? mentorship-enrollments enrollment-key) err-not-mentee))
+    (phase-data (unwrap! (map-get? mentorship-phases phase-key) err-phase-not-found))
+    (current-block stacks-block-height)
+  )
+    (asserts! (is-eq (get completion-status enrollment-data) "active") err-mentorship-not-active)
+    (asserts! (is-eq (get current-phase enrollment-data) phase-number) err-invalid-phase)
+    (asserts! (is-none (map-get? phase-completions completion-key)) err-phase-already-completed)
+    (asserts! (>= hours-spent (get required-hours phase-data)) err-invalid-amount)
+    (map-set phase-completions completion-key {
+      completed-at: current-block,
+      hours-spent: hours-spent,
+      mentor-assessment: u0,
+      mentee-reflection: mentee-reflection,
+      evidence-provided: evidence-provided,
+      approved: false
+    })
+    (ok true)
+  )
+)
+
+(define-public (assess-phase-completion
+  (program-id uint)
+  (mentee principal)
+  (phase-number uint)
+  (assessment-score uint)
+  (approved bool))
+  (let (
+    (program-data (unwrap! (map-get? mentorship-programs program-id) err-mentorship-not-found))
+    (enrollment-key {program-id: program-id, mentee: mentee})
+    (completion-key {program-id: program-id, mentee: mentee, phase-number: phase-number})
+    (enrollment-data (unwrap! (map-get? mentorship-enrollments enrollment-key) err-not-mentee))
+    (completion-data (unwrap! (map-get? phase-completions completion-key) err-phase-not-found))
+    (phase-data (unwrap! (map-get? mentorship-phases {program-id: program-id, phase-number: phase-number}) err-phase-not-found))
+  )
+    (asserts! (is-eq tx-sender (get mentor program-data)) err-not-mentor)
+    (asserts! (not (get approved completion-data)) err-phase-already-completed)
+    (asserts! (<= assessment-score u100) err-invalid-amount)
+    (if approved
+      (let (
+        (reward-amount (get reward-amount phase-data))
+        (mentee-balance (default-to u0 (map-get? user-balances mentee)))
+        (new-current-phase (if (is-eq phase-number (get phases-count program-data)) phase-number (+ phase-number u1)))
+        (new-phases-completed (+ (get phases-completed enrollment-data) u1))
+        (new-total-hours (+ (get total-hours-logged enrollment-data) (get hours-spent completion-data)))
+        (new-performance-score (/ (+ (* (get performance-score enrollment-data) (get phases-completed enrollment-data)) assessment-score) new-phases-completed))
+      )
+        (map-set user-balances mentee (+ mentee-balance reward-amount))
+        (map-set mentorship-enrollments enrollment-key (merge enrollment-data {
+          current-phase: new-current-phase,
+          phases-completed: new-phases-completed,
+          total-hours-logged: new-total-hours,
+          performance-score: new-performance-score,
+          completion-status: (if (is-eq new-phases-completed (get phases-count program-data)) "graduated" "active")
+        }))
+        (if (is-eq new-phases-completed (get phases-count program-data))
+          (map-set mentorship-programs program-id (merge program-data {
+            total-graduates: (+ (get total-graduates program-data) u1),
+            completion-rate: (/ (* (+ (get total-graduates program-data) u1) u100) (get current-mentees program-data))
+          }))
+          true
+        )
+      )
+      true
+    )
+    (map-set phase-completions completion-key (merge completion-data {
+      mentor-assessment: assessment-score,
+      approved: approved
+    }))
+    (ok true)
+  )
+)
+
+(define-public (rate-mentorship-program
+  (program-id uint)
+  (rating uint))
+  (let (
+    (program-data (unwrap! (map-get? mentorship-programs program-id) err-mentorship-not-found))
+    (enrollment-key {program-id: program-id, mentee: tx-sender})
+    (enrollment-data (unwrap! (map-get? mentorship-enrollments enrollment-key) err-not-mentee))
+    (current-rating (get mentor-rating program-data))
+    (total-graduates (get total-graduates program-data))
+    (new-rating (if (is-eq total-graduates u0) rating (/ (+ (* current-rating total-graduates) rating) (+ total-graduates u1))))
+  )
+    (asserts! (is-eq (get completion-status enrollment-data) "graduated") err-unauthorized)
+    (asserts! (<= rating u5) err-invalid-amount)
+    (asserts! (>= rating u1) err-invalid-amount)
+    (map-set mentorship-programs program-id (merge program-data {
+      mentor-rating: new-rating
+    }))
+    (ok true)
+  )
+)
+
+(define-public (withdraw-from-mentorship (program-id uint))
+  (let (
+    (enrollment-key {program-id: program-id, mentee: tx-sender})
+    (enrollment-data (unwrap! (map-get? mentorship-enrollments enrollment-key) err-not-mentee))
+    (program-data (unwrap! (map-get? mentorship-programs program-id) err-mentorship-not-found))
+  )
+    (asserts! (is-eq (get completion-status enrollment-data) "active") err-unauthorized)
+    (map-set mentorship-enrollments enrollment-key (merge enrollment-data {
+      completion-status: "withdrawn"
+    }))
+    (map-set mentorship-programs program-id (merge program-data {
+      current-mentees: (- (get current-mentees program-data) u1)
+    }))
+    (ok true)
+  )
+)
+
+(define-public (toggle-mentorship-status (program-id uint))
+  (let ((program-data (unwrap! (map-get? mentorship-programs program-id) err-mentorship-not-found)))
+    (asserts! (is-eq tx-sender (get mentor program-data)) err-not-mentor)
+    (map-set mentorship-programs program-id (merge program-data {active: (not (get active program-data))}))
+    (ok true)
+  )
+)
+
+(define-read-only (get-mentorship-program (program-id uint))
+  (map-get? mentorship-programs program-id)
+)
+
+(define-read-only (get-mentorship-phase (program-id uint) (phase-number uint))
+  (map-get? mentorship-phases {program-id: program-id, phase-number: phase-number})
+)
+
+(define-read-only (get-mentorship-application (application-id uint))
+  (map-get? mentorship-applications application-id)
+)
+
+(define-read-only (get-mentorship-enrollment (program-id uint) (mentee principal))
+  (map-get? mentorship-enrollments {program-id: program-id, mentee: mentee})
+)
+
+(define-read-only (get-phase-completion (program-id uint) (mentee principal) (phase-number uint))
+  (map-get? phase-completions {program-id: program-id, mentee: mentee, phase-number: phase-number})
+)
+
+(define-read-only (get-mentor-mentees (mentor principal))
+  (default-to (list) (map-get? mentor-mentees mentor))
+)
+
+(define-read-only (get-mentee-programs (mentee principal))
+  (default-to (list) (map-get? mentee-programs mentee))
+)
+
+(define-read-only (get-program-applications (program-id uint))
+  (default-to (list) (map-get? program-applications program-id))
+)
+
+(define-read-only (get-next-mentorship-id)
+  (var-get next-mentorship-id)
+)
+
+(define-read-only (get-next-application-id)
+  (var-get next-application-id)
+)
+
+(define-read-only (get-mentorship-platform-fee)
+  (var-get mentorship-platform-fee)
+)
+
+
+
