@@ -914,6 +914,3 @@
 (define-read-only (get-mentorship-platform-fee)
   (var-get mentorship-platform-fee)
 )
-
-
-

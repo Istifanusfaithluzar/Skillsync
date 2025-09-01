@@ -9,6 +9,16 @@ requirements = []
 path = 'contracts/Skillsync.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.SkillCompetition]
+path = 'contracts/SkillCompetition.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.SkillEndorsement]
+path = 'contracts/SkillEndorsement.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
